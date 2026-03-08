@@ -22,31 +22,25 @@ def run_task(prompt, cwd):
     model = choose_model("plan")
 
     planning_prompt = f"""
-You are a coding agent.
-
-You MUST respond only using these commands:
-
-WRITE: <file_path>
-<file content>
-
-RUN: <terminal command>
-
-READ: <file_path>
-
-DONE
+You are a planning agent.
+Create a step-by-step plan to complete the following task:
 
 User request:
 {prompt}
 
 Important guidelines:
 1. All file paths should be relative to the current working directory
-2. When creating Python files, make sure the content is valid Python code
-3. Break down complex tasks into smaller steps
+2. Break down complex tasks into smaller steps
+3. Be as detailed as possible in the plan, but do not include implementation details
+4. The plan should be in a clear, numbered format, with each step on a new line.
+5. Do not include any commands or code snippets in the plan, only high-level steps
 """
 
     plan = run_model(model, planning_prompt)
 
-    print("PLAN GENERATED\n")
+    print("PLAN:")
+    print("==================================="*3)
+    print(plan)
 
     # Track executed commands
     executed_commands = ""
@@ -61,6 +55,9 @@ Important guidelines:
 You are a coding agent.
 
 Respond with EXACTLY ONE command at a time:
+there are three types of commands - WRITE, RUN, and READ.
+
+syntax for each command:
 
 WRITE: <file_path>
 <file content>
@@ -72,7 +69,7 @@ READ: <file_path>
 DONE
 
 Current task:
-{prompt}
+{plan}
 
 Execution history:
 {executed_commands}
@@ -81,7 +78,7 @@ Important guidelines:
 1. All file paths should be relative to the current working directory
 2. When creating Python files, make sure the content is valid Python code
 3. Respond with exactly one command at a time
-4. Only use DONE when the task is completely finished
+4. Only use DONE when the task is completely finished.
 """
 
         action = run_model(model, action_prompt)
