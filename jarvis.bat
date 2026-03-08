@@ -1,1 +1,1 @@
-python D:\Projects\Local Ais\Jarvis-Ai\jarvis.py
+python D:\Projects\Local-Ai\Jarvis-Ai\jarvis.py
