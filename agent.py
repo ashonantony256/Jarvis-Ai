@@ -124,42 +124,6 @@ def run_task(prompt, cwd):
 
         return False
 
-    def parse_directory_change(cmd):
-        """Parse simple directory-change commands and return target path if present."""
-        raw = (cmd or "").strip()
-        lower = raw.lower()
-
-        prefixes = ["cd ", "chdir ", "set-location "]
-        chosen_prefix = ""
-        for prefix in prefixes:
-            if lower.startswith(prefix):
-                chosen_prefix = prefix
-                break
-
-        if not chosen_prefix:
-            return None
-
-        target = raw[len(chosen_prefix) :].strip()
-        if not target:
-            return None
-
-        if (target.startswith('"') and target.endswith('"')) or (
-            target.startswith("'") and target.endswith("'")
-        ):
-            target = target[1:-1]
-
-        return target
-
-    def resolve_next_cwd(current_cwd, target):
-        """Resolve next working directory from a cd-like target."""
-        if not target:
-            return current_cwd
-
-        expanded = os.path.expandvars(target)
-        if os.path.isabs(expanded):
-            return os.path.abspath(expanded)
-        return os.path.abspath(os.path.join(current_cwd, expanded))
-
     prompt_lower = prompt.lower()
     mutation_intent_keywords = [
         "create",
@@ -222,7 +186,6 @@ IMPORTANT:
         executed_commands = ""
         last_step_result = "No steps executed yet."
         pending_action = ""
-        current_cwd = os.path.abspath(cwd)
         debug_mode = False
         last_failed_command = ""
         last_error_message = ""
@@ -379,7 +342,7 @@ CRITICAL RULES:
 
                 print(f"EXECUTING COMMAND: {cmd}")
 
-                result = run_command(cmd, current_cwd)
+                result = run_command(cmd, cwd)
 
                 last_step_result = f"""Action: RUN
 Command: {cmd}
@@ -408,14 +371,6 @@ STDERR:
 
                 else:
                     print("COMMAND SUCCESS\n")
-                    cd_target = parse_directory_change(cmd)
-                    if cd_target:
-                        next_cwd = resolve_next_cwd(current_cwd, cd_target)
-                        if os.path.isdir(next_cwd):
-                            current_cwd = next_cwd
-                            print(f"WORKING DIRECTORY UPDATED: {current_cwd}\n")
-                        else:
-                            print(f"DIRECTORY NOT FOUND AFTER CD: {next_cwd}\n")
                     last_action_success = True
                     if is_mutating_command(cmd) and not is_navigation_or_noop_command(cmd):
                         mutating_action_count += 1
@@ -432,12 +387,12 @@ STDERR:
 
                 print(f"READING FILE: {path}")
 
-                target_path = os.path.join(current_cwd, path)
+                target_path = os.path.join(cwd, path)
 
                 try:
                     if os.path.isdir(target_path):
                         files = list_files(target_path)
-                        rel_files = [os.path.relpath(file_path, current_cwd) for file_path in files]
+                        rel_files = [os.path.relpath(file_path, cwd) for file_path in files]
                         rel_files = [
                             rel_path
                             for rel_path in rel_files
@@ -510,7 +465,7 @@ STDERR:
                 print(content)
                 print("--------------------------------\n")
                 try:
-                    write_file(os.path.join(current_cwd, file_path), content)
+                    write_file(os.path.join(cwd, file_path), content)
 
                     last_step_result = f"WRITE '{file_path}' succeeded. Wrote {len(content)} characters."
                     last_action_success = True
