@@ -57,6 +57,20 @@ On Windows, you can also use:
 jarvis.bat
 ```
 
+## Global `jarvis` Command (Windows)
+
+To run Jarvis from any directory as `jarvis`, run this once from the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-jarvis-command.ps1
+```
+
+Then open a new terminal and run:
+
+```powershell
+jarvis
+```
+
 ## Usage
 
 When started, Jarvis shows two modes:
