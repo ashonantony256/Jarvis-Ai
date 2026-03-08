@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 
@@ -12,12 +13,23 @@ def run_command(cmd, cwd):
 
     start = time.time()
 
+    if os.name == "nt":
+        # Use PowerShell on Windows so commands like rm/ls/cat are supported.
+        run_args = {
+            "args": ["powershell", "-NoProfile", "-Command", cmd],
+            "shell": False,
+        }
+    else:
+        run_args = {
+            "args": cmd,
+            "shell": True,
+        }
+
     result = subprocess.run(
-        cmd,
-        shell=True,
         cwd=cwd,
         capture_output=True,
-        text=True
+        text=True,
+        **run_args,
     )
 
     end = time.time()
