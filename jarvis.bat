@@ -1,1 +1,2 @@
-python D:\Projects\Local-Ai\Jarvis-Ai\jarvis.py
+@echo off
+python "%~dp0jarvis.py"

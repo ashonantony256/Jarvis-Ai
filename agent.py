@@ -1,4 +1,5 @@
 import time
+import os
 
 from router import choose_model
 from ollama_client import run_model
@@ -36,11 +37,19 @@ DONE
 
 User request:
 {prompt}
+
+Important guidelines:
+1. All file paths should be relative to the current working directory
+2. When creating Python files, make sure the content is valid Python code
+3. Break down complex tasks into smaller steps
 """
 
     plan = run_model(model, planning_prompt)
 
     print("PLAN GENERATED\n")
+
+    # Track executed commands
+    executed_commands = ""
 
     while True:
 
@@ -51,7 +60,7 @@ User request:
         action_prompt = f"""
 You are a coding agent.
 
-Only respond with one of these commands:
+Respond with EXACTLY ONE command at a time:
 
 WRITE: <file_path>
 <file content>
@@ -63,7 +72,16 @@ READ: <file_path>
 DONE
 
 Current task:
-{plan}
+{prompt}
+
+Execution history:
+{executed_commands}
+
+Important guidelines:
+1. All file paths should be relative to the current working directory
+2. When creating Python files, make sure the content is valid Python code
+3. Respond with exactly one command at a time
+4. Only use DONE when the task is completely finished
 """
 
         action = run_model(model, action_prompt)
@@ -72,9 +90,14 @@ Current task:
         print(action)
         print()
 
+        # Add this action to the execution history
+        executed_commands += f"\n{action}"
+
         if action.startswith("RUN:"):
 
             cmd = action.replace("RUN:", "").strip()
+
+            print(f"EXECUTING COMMAND: {cmd}")
 
             result = run_command(cmd, cwd)
 
@@ -115,20 +138,37 @@ DONE
 
             path = action.replace("READ:", "").strip()
 
-            content = read_file(f"{cwd}/{path}")
+            print(f"READING FILE: {path}")
 
-            plan = f"File content:\n{content}"
+            content = read_file(os.path.join(cwd, path))
+
+            print(f"FILE CONTENT:\n{content}\n")
+
+            executed_commands += f"\nFile content:\n{content}"
 
 
         elif action.startswith("WRITE:"):
 
-            parts = action.split("\n", 1)
+            lines = action.strip().split("\n")
 
-            file_path = parts[0].replace("WRITE:", "").strip()
+            # First line contains "WRITE: <file_path>"
+            file_path = lines[0].replace("WRITE:", "").strip()
 
-            content = parts[1] if len(parts) > 1 else ""
+            # Content is everything after the first line until we hit another command
+            content_lines = []
+            for line in lines[1:]:
+                if line.startswith(("RUN:", "READ:", "WRITE:", "DONE")):
+                    break
+                content_lines.append(line)
 
-            write_file(f"{cwd}/{file_path}", content)
+            content = "\n".join(content_lines)
+
+            print(f"WRITING FILE: {file_path}")
+            print(f"CONTENT:\n{content}\n")
+
+            write_file(os.path.join(cwd, file_path), content)
+
+            executed_commands += f"\nWRITE: {file_path}\n{content}"
 
             print("FILE UPDATED\n")
 
