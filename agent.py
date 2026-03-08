@@ -16,13 +16,12 @@ def run_task(prompt, cwd):
     total_start = time.time()
 
     # STEP 1: Planning
-
     print("STEP 1: Planning task")
 
     model = choose_model("plan")
 
     planning_prompt = f"""
-You are a planning agent.
+You are a planning agent.You are giving intstuctions to another agent who can execute cmd commands and write code,etc.
 Create a step-by-step plan to complete the following task:
 
 User request:
@@ -31,21 +30,30 @@ User request:
 Important guidelines:
 1. All file paths should be relative to the current working directory
 2. Break down complex tasks into smaller steps
-3. Be as detailed as possible in the plan, but do not include implementation details
-4. The plan should be in a clear, numbered format, with each step on a new line.
-5. Do not include any commands or code snippets in the plan, only high-level steps
+3. Be as detailed as possible
+4. Use numbered steps
+5. Do NOT include commands or code
 """
 
     plan = run_model(model, planning_prompt)
 
-    print("PLAN:")
-    print("==================================="*3)
+    print("\nPLAN:")
+    print("===================================")
     print(plan)
+    print("===================================\n")
 
-    # Track executed commands
     executed_commands = ""
+    step_count = 0
 
     while True:
+
+        step_count += 1
+
+        if step_count > 50:
+            print("STOPPING: Too many steps")
+            break
+
+        step_start = time.time()
 
         print("STEP 2: Generating action")
 
@@ -54,10 +62,9 @@ Important guidelines:
         action_prompt = f"""
 You are a coding agent.
 
-Respond with EXACTLY ONE command at a time:
-there are three types of commands - WRITE, RUN, and READ.
+Respond with EXACTLY ONE command.
 
-syntax for each command:
+Allowed commands:
 
 WRITE: <file_path>
 <file content>
@@ -68,35 +75,45 @@ READ: <file_path>
 
 DONE
 
-Current task:
+Current task plan:
 {plan}
 
 Execution history:
 {executed_commands}
 
-Important guidelines:
-1. All file paths should be relative to the current working directory
-2. When creating Python files, make sure the content is valid Python code
-3. Respond with exactly one command at a time
-4. Only use DONE when the task is completely finished.
+Rules:
+1. Only ONE command per response
+2. No explanations
+3. Paths must be relative
 """
 
-        action = run_model(model, action_prompt)
+        raw_action = run_model(model, action_prompt)
 
-        print("ACTION RETURNED:")
-        print(action)
-        print()
+        print("\nRAW MODEL OUTPUT:")
+        print("--------------------------------")
+        print(raw_action)
+        print("--------------------------------\n")
 
-        # Add this action to the execution history
-        executed_commands += f"\n{action}"
+        action = raw_action.strip().replace("```", "")
 
-        if action.startswith("RUN:"):
+        # RUN COMMAND
+        if "RUN:" in action:
 
-            cmd = action.replace("RUN:", "").strip()
+            cmd = action.split("RUN:")[1].strip().split("\n")[0]
 
             print(f"EXECUTING COMMAND: {cmd}")
 
             result = run_command(cmd, cwd)
+
+            executed_commands += f"""
+RUN: {cmd}
+
+OUTPUT:
+{result.get('stdout','')}
+
+ERROR:
+{result.get('stderr','')}
+"""
 
             if result["code"] != 0:
 
@@ -111,7 +128,7 @@ Command:
 Error:
 {result['stderr']}
 
-Respond with a FIX using the allowed commands:
+Respond with ONE command using:
 
 WRITE: <file_path>
 <content>
@@ -125,58 +142,76 @@ DONE
 
                 model = choose_model("debug")
 
-                plan = run_model(model, debug_prompt)
+                debug_fix = run_model(model, debug_prompt)
+
+                print("DEBUG RESPONSE:")
+                print(debug_fix)
+
+                executed_commands += f"\nDEBUG RESPONSE:\n{debug_fix}\n"
 
             else:
                 print("COMMAND SUCCESS\n")
 
+        # READ FILE
+        elif "READ:" in action:
 
-        elif action.startswith("READ:"):
-
-            path = action.replace("READ:", "").strip()
+            path = action.split("READ:")[1].strip().split("\n")[0]
 
             print(f"READING FILE: {path}")
 
             content = read_file(os.path.join(cwd, path))
 
-            print(f"FILE CONTENT:\n{content}\n")
+            print("\nFILE CONTENT:")
+            print("--------------------------------")
+            print(content)
+            print("--------------------------------\n")
 
-            executed_commands += f"\nFile content:\n{content}"
+            executed_commands += f"""
+READ: {path}
 
+CONTENT:
+{content}
+"""
 
-        elif action.startswith("WRITE:"):
+        # WRITE FILE
+        elif "WRITE:" in action:
 
-            lines = action.strip().split("\n")
+            lines = action.split("\n")
 
-            # First line contains "WRITE: <file_path>"
-            file_path = lines[0].replace("WRITE:", "").strip()
+            file_path = lines[0].split("WRITE:")[1].strip()
 
-            # Content is everything after the first line until we hit another command
-            content_lines = []
-            for line in lines[1:]:
-                if line.startswith(("RUN:", "READ:", "WRITE:", "DONE")):
-                    break
-                content_lines.append(line)
-
-            content = "\n".join(content_lines)
+            content = "\n".join(lines[1:])
 
             print(f"WRITING FILE: {file_path}")
-            print(f"CONTENT:\n{content}\n")
+
+            print("\nCONTENT:")
+            print("--------------------------------")
+            print(content)
+            print("--------------------------------\n")
 
             write_file(os.path.join(cwd, file_path), content)
 
-            executed_commands += f"\nWRITE: {file_path}\n{content}"
+            executed_commands += f"""
+WRITE: {file_path}
+
+{content}
+"""
 
             print("FILE UPDATED\n")
 
+        # DONE
+        elif "DONE" in action:
 
-        elif action.startswith("DONE"):
-
+            print("TASK COMPLETE\n")
             break
 
         else:
 
             print("INVALID ACTION FORMAT — retrying...\n")
+
+        step_end = time.time()
+
+        print(f"STEP TIME: {round(step_end-step_start,2)} seconds\n")
 
     total_end = time.time()
 
