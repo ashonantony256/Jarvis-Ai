@@ -1,5 +1,6 @@
 import time
 import os
+from typing import Dict, Optional
 
 from router import choose_model
 from ollama_client import run_model
@@ -7,7 +8,7 @@ from tools.terminal import run_command
 from tools.files import read_file, write_file, list_files
 
 
-def run_task(prompt, cwd):
+def run_task(prompt, cwd, context=None, available_models=None):
 
     def extract_single_action(raw_text):
         """Extract exactly one valid action from model output."""
@@ -57,6 +58,37 @@ def run_task(prompt, cwd):
             return safe_text
         truncated = len(safe_text) - limit
         return safe_text[:limit] + f"\n... [truncated {truncated} chars]"
+
+    def is_risky_command(cmd):
+        normalized = (cmd or "").strip().lower()
+        risky_patterns = [
+            "rm -rf",
+            "del /f",
+            "rmdir /s",
+            "format ",
+            "shutdown ",
+            "pip install --upgrade pip",
+            "npm install -g",
+            "choco install",
+            "winget install",
+        ]
+        return any(pattern in normalized for pattern in risky_patterns)
+
+    def requires_run_verification(prompt_text):
+        lower = (prompt_text or "").lower()
+        return any(token in lower for token in ["run", "start", "serve", "launch"])
+
+    def summarize_step_result(result: Dict[str, str], cmd: str):
+        return f"""Action: RUN
+Command: {cmd}
+Exit Code: {result.get('code', 'unknown')}
+Timed Out: {result.get('timed_out', False)}
+Error Type: {result.get('error_type', 'unknown')}
+STDOUT:
+{result.get('stdout_trimmed', '')}
+STDERR:
+{result.get('stderr_trimmed', '')}
+"""
 
     def is_navigation_or_noop_command(cmd):
         normalized = (cmd or "").strip().lower()
@@ -156,10 +188,10 @@ def run_task(prompt, cwd):
         # STEP 1: Planning
         print("STEP 1: Planning task")
 
-        model = choose_model("plan")
+        model = choose_model("plan", available_models=available_models)
 
         planning_prompt = f"""
-You are a planning agent. Create a SHORT, SIMPLE plan for another AI coding agent who can run terminal commands,Read/Write files, and write code.
+You are a planning agent. Create a SHORT, SIMPLE plan for another AI coding agent who can run terminal commands, read/write files, and write code.
 
 Current directory: {cwd}
 
@@ -168,15 +200,15 @@ User request:
 
 IMPORTANT:
 1. Keep plans SHORT and SIMPLE
-2. Do NOT include verification or confirmation steps
-3. For file deletion: just delete the file, don't verify
-4. For file creation: just create the file
-5. Trust that exit code 0 means success
-6. Use numbered steps
-7. Do NOT include commands or code in the plan - just plain language descriptions of the steps needed to complete the task
+2. Include one preflight step to understand directory/files before mutation.
+3. Include verification steps for critical outcomes (especially run/start tasks).
+4. Use numbered steps
+5. Do NOT include commands or code in the plan - just plain language descriptions of the steps needed to complete the task
 """
 
-        plan = run_model(model, planning_prompt)
+        history = context.chat_history[-8:] if context else None
+        system_prompt = context.system_prompt if context else None
+        plan = run_model(model, planning_prompt, system_prompt=system_prompt, history=history)
 
         print("\nPLAN:")
         print("===================================")
@@ -194,6 +226,10 @@ IMPORTANT:
         mutating_action_count = 0
         debug_success_since_failure = 0
         last_action_success = False
+        successful_run_count = 0
+        preflight_done = False
+        repeated_failure_counts = {}
+        requires_run_success = requires_run_verification(prompt)
 
         def append_step_history(action_type, target, status, details):
             nonlocal executed_commands
@@ -206,6 +242,31 @@ IMPORTANT:
     {details}
     --- END STEP ---
     """
+
+        if prompt_requires_mutation:
+            try:
+                initial_files = list_files(cwd)
+                rel_files = [os.path.relpath(path, cwd) for path in initial_files]
+                rel_files = [
+                    rel_path
+                    for rel_path in rel_files
+                    if not rel_path.startswith(".git\\")
+                    and "__pycache__" not in rel_path
+                    and "node_modules" not in rel_path
+                ]
+                visible = rel_files[:200]
+                snapshot_text = "\n".join(visible)
+                if len(rel_files) > 200:
+                    snapshot_text += f"\n... truncated {len(rel_files) - 200} more files"
+                preflight_done = True
+                last_step_result = (
+                    f"Preflight directory scan complete. Visible files: {len(visible)}. "
+                    "Use this context before mutating actions."
+                )
+                append_step_history("PREFLIGHT", cwd, "success", truncate_for_history(snapshot_text))
+            except Exception as e:
+                append_step_history("PREFLIGHT", cwd, "failure", str(e))
+                last_step_result = f"Preflight scan failed: {e}"
 
         while True:
 
@@ -227,7 +288,7 @@ IMPORTANT:
                 print(action)
                 print("--------------------------------\n")
             else:
-                model = choose_model("debug" if debug_mode else "code")
+                model = choose_model("debug" if debug_mode else "code", available_models=available_models)
 
                 if debug_mode:
                     action_prompt = f"""
@@ -241,6 +302,9 @@ TASK PLAN:
 
 FULL EXECUTION HISTORY:
 {executed_commands}
+
+SESSION SUMMARY:
+{context.build_session_summary() if context else 'No session summary available.'}
 
 LAST FAILED COMMAND:
 {last_failed_command}
@@ -274,6 +338,7 @@ IMPORTANT:
 7. Do NOT respond DONE before at least one recovery attempt action (RUN/READ/WRITE)
 8. Remain in debugging flow until completion
 9. Use RESUME only when the issue is fixed and normal coding flow should continue
+10. If a mutating action is needed and preflight context is missing, do READ: . first
 """
                 else:
                     action_prompt = f"""
@@ -290,6 +355,9 @@ EXECUTION HISTORY:
 
 LAST STEP RESULT:
 {last_step_result}
+
+SESSION SUMMARY:
+{context.build_session_summary() if context else 'No session summary available.'}
 
 Respond with EXACTLY ONE command from:
 
@@ -316,9 +384,12 @@ CRITICAL RULES:
 11. Do NOT repeat failed commands - try different approach or DONE if impossible
 12. If a command failed because the desired state already exists, respond with: DONE
 13. Use LAST STEP RESULT to decide the next best action for ANY task type
+14. Before mutating actions, ensure directory context exists (READ . if needed)
 """
 
-                raw_action = run_model(model, action_prompt)
+                history = context.chat_history[-8:] if context else None
+                system_prompt = context.system_prompt if context else None
+                raw_action = run_model(model, action_prompt, system_prompt=system_prompt, history=history)
                 action = extract_single_action(raw_action)
 
                 print("\nRAW MODEL OUTPUT:")
@@ -340,24 +411,53 @@ CRITICAL RULES:
 
                 cmd = action.split("RUN:")[1].strip().split("\n")[0]
 
+                if context and context.safety_mode and is_risky_command(cmd):
+                    last_step_result = (
+                        f"Blocked by safety mode: '{cmd}'. "
+                        "Disable safety mode from CLI with 'safe off' to allow risky command."
+                    )
+                    last_action_success = False
+                    debug_mode = True
+                    last_failed_command = cmd
+                    last_error_message = "blocked-by-safety-mode"
+                    append_step_history("RUN", cmd, "blocked", last_step_result)
+                    print("COMMAND BLOCKED BY SAFETY MODE\n")
+                    step_end = time.time()
+                    print(f"STEP TIME: {round(step_end-step_start,2)} seconds\n")
+                    continue
+
+                if not preflight_done and (prompt_requires_mutation or is_mutating_command(cmd)):
+                    last_step_result = "RUN rejected: preflight directory context missing. Use READ: . before mutating commands."
+                    append_step_history("RUN", cmd, "rejected", last_step_result)
+                    print("RUN REJECTED - PREFLIGHT REQUIRED\n")
+                    step_end = time.time()
+                    print(f"STEP TIME: {round(step_end-step_start,2)} seconds\n")
+                    continue
+
+                if debug_mode and repeated_failure_counts.get(cmd, 0) >= 2:
+                    last_step_result = (
+                        f"RUN rejected: command '{cmd}' already failed multiple times. "
+                        "Choose a different recovery approach."
+                    )
+                    append_step_history("RUN", cmd, "rejected", last_step_result)
+                    print("RUN REJECTED - REPEATED FAILURE\n")
+                    step_end = time.time()
+                    print(f"STEP TIME: {round(step_end-step_start,2)} seconds\n")
+                    continue
+
                 print(f"EXECUTING COMMAND: {cmd}")
 
-                result = run_command(cmd, cwd)
+                result = run_command(cmd, cwd, timeout_seconds=240)
 
-                last_step_result = f"""Action: RUN
-Command: {cmd}
-Exit Code: {result.get('code', 'unknown')}
-STDOUT:
-{result.get('stdout', '')}
-STDERR:
-{result.get('stderr', '')}
-"""
+                last_step_result = summarize_step_result(result, cmd)
 
                 run_details = f"""Exit Code: {result.get('code', 'unknown')}
+Timed Out: {result.get('timed_out', False)}
+Error Type: {result.get('error_type', 'unknown')}
 STDOUT:
-{truncate_for_history(result.get('stdout', ''))}
+{result.get('stdout_trimmed', '')}
 STDERR:
-{truncate_for_history(result.get('stderr', ''))}
+{result.get('stderr_trimmed', '')}
 """
 
                 if result["code"] != 0:
@@ -365,13 +465,16 @@ STDERR:
                     print("\nERROR DETECTED -> DEBUGGING\n")
                     debug_mode = True
                     last_failed_command = cmd
-                    last_error_message = result.get("stderr", "")
+                    last_error_message = result.get("stderr_trimmed", "")
+                    repeated_failure_counts[cmd] = repeated_failure_counts.get(cmd, 0) + 1
                     last_action_success = False
                     append_step_history("RUN", cmd, "failure", run_details)
 
                 else:
                     print("COMMAND SUCCESS\n")
                     last_action_success = True
+                    successful_run_count += 1
+                    repeated_failure_counts[cmd] = 0
                     if is_mutating_command(cmd) and not is_navigation_or_noop_command(cmd):
                         mutating_action_count += 1
                     if debug_mode:
@@ -398,6 +501,7 @@ STDERR:
                             for rel_path in rel_files
                             if not rel_path.startswith(".git\\")
                             and "__pycache__" not in rel_path
+                            and "node_modules" not in rel_path
                         ]
                         max_files = 200
                         visible_files = rel_files[:max_files]
@@ -411,6 +515,8 @@ STDERR:
                         print(content)
                         print("--------------------------------\n")
                         last_step_result = f"READ directory '{path}' succeeded. Returned {len(visible_files)} paths."
+                        if path.strip() in [".", "./", ""]:
+                            preflight_done = True
                         last_action_success = True
                         if debug_mode:
                             debug_success_since_failure += 1
@@ -456,6 +562,23 @@ STDERR:
 
                 file_path = lines[0].split("WRITE:")[1].strip()
 
+                normalized_file_path = file_path.replace("/", "\\")
+                if "..\\" in normalized_file_path or normalized_file_path.startswith(".."):
+                    last_step_result = f"WRITE rejected: path traversal is not allowed ('{file_path}')."
+                    append_step_history("WRITE", file_path, "rejected", last_step_result)
+                    print("WRITE REJECTED - UNSAFE PATH\n")
+                    step_end = time.time()
+                    print(f"STEP TIME: {round(step_end-step_start,2)} seconds\n")
+                    continue
+
+                if not preflight_done and prompt_requires_mutation:
+                    last_step_result = "WRITE rejected: preflight directory context missing. Use READ: . before write operations."
+                    append_step_history("WRITE", file_path, "rejected", last_step_result)
+                    print("WRITE REJECTED - PREFLIGHT REQUIRED\n")
+                    step_end = time.time()
+                    print(f"STEP TIME: {round(step_end-step_start,2)} seconds\n")
+                    continue
+
                 content = "\n".join(lines[1:])
 
                 print(f"WRITING FILE: {file_path}")
@@ -497,10 +620,16 @@ STDERR:
 
                 if executed_action_count == 0:
                     done_rejection_reason = "DONE rejected: No action has been executed yet."
+                elif prompt_requires_mutation and not preflight_done:
+                    done_rejection_reason = "DONE rejected: mutation task requires preflight directory understanding first."
                 elif prompt_requires_mutation and mutating_action_count == 0:
                     done_rejection_reason = (
                         "DONE rejected: Task requires file/system changes but no mutating action has succeeded yet. "
                         "Navigation/list commands are not completion."
+                    )
+                elif requires_run_success and successful_run_count == 0:
+                    done_rejection_reason = (
+                        "DONE rejected: request implies run/start verification, but no command completed successfully yet."
                     )
                 elif debug_mode and not last_action_success and debug_success_since_failure == 0:
                     done_rejection_reason = "DONE rejected: Debug mode active and no successful recovery step has occurred yet."
@@ -514,6 +643,10 @@ STDERR:
                     continue
 
                 print("TASK COMPLETE\n")
+                if context:
+                    context.add_task_summary(
+                        f"Task: {prompt[:80]} | actions={executed_action_count} | runs={successful_run_count} | debug={'on' if debug_mode else 'off'}"
+                    )
                 break
 
             # RESUME
@@ -539,6 +672,10 @@ STDERR:
     except KeyboardInterrupt:
         print("\n\n[Task interrupted by user - Ctrl+C]")
         print("Stopping task execution...\n")
+        if context:
+            context.add_task_summary(
+                f"Task interrupted: {prompt[:80]} | actions={executed_action_count if 'executed_action_count' in locals() else 0}"
+            )
         return
 
     total_end = time.time()

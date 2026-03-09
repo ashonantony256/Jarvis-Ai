@@ -2,7 +2,31 @@ import ollama
 import time
 
 
-def run_model(model, prompt):
+def get_available_models():
+    try:
+        payload = ollama.list()
+        models = payload.get("models", [])
+        result = []
+        for item in models:
+            name = item.get("model") or item.get("name")
+            if name:
+                result.append(name)
+        return result
+    except Exception:
+        return []
+
+
+def _build_messages(prompt, system_prompt=None, history=None):
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def run_model(model, prompt, system_prompt=None, history=None):
 
     print("\n==============================")
     print(f"MODEL STARTED: {model}")
@@ -12,7 +36,7 @@ def run_model(model, prompt):
 
     response = ollama.chat(
         model=model,
-        messages=[{"role": "user", "content": prompt}]
+        messages=_build_messages(prompt, system_prompt=system_prompt, history=history),
     )
 
     end = time.time()
@@ -24,7 +48,7 @@ def run_model(model, prompt):
     return response["message"]["content"]
 
 
-def run_chat_model(model, prompt):
+def run_chat_model(model, prompt, system_prompt=None, history=None):
     """Run a chat model for conversational interaction"""
     print("\n==============================")
     print(f"CHAT MODEL STARTED: {model}")
@@ -34,7 +58,7 @@ def run_chat_model(model, prompt):
 
     response = ollama.chat(
         model=model,
-        messages=[{"role": "user", "content": prompt}]
+        messages=_build_messages(prompt, system_prompt=system_prompt, history=history),
     )
 
     end = time.time()
