@@ -1,13 +1,13 @@
 def choose_model(task):
 
     if task == "plan":
-        return "phi3:mini"
+        return "gpt-oss:120b-cloud"
 
     if task == "debug":
-        return "deepseek-coder:6.7b"
+        return "gpt-oss:120b-cloud"
 
     if task == "code":
-        return "qwen2.5-coder:3b"
+        return "gpt-oss:120b-cloud"
 
     if task == "chat":
         return "gemma2:2b"
