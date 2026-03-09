@@ -1,6 +1,6 @@
 import time
 import os
-from typing import Dict, Optional
+from typing import Dict
 
 from router import choose_model
 from ollama_client import run_model
@@ -39,6 +39,17 @@ def run_task(prompt, cwd, context=None, available_models=None):
 
         first = lines[start_idx].strip()
 
+        # Recover from malformed single-line outputs such as
+        # "RUN: cmdRUN: cmd" by keeping only the first action segment.
+        if first.startswith("RUN:"):
+            extra = first.find("RUN:", 4)
+            if extra != -1:
+                first = first[:extra].strip()
+        elif first.startswith("READ:"):
+            extra = first.find("READ:", 5)
+            if extra != -1:
+                first = first[:extra].strip()
+
         if first.startswith("WRITE:"):
             content_lines = []
             for line in lines[start_idx + 1 :]:
@@ -50,6 +61,31 @@ def run_task(prompt, cwd, context=None, available_models=None):
             return first + "\n"
 
         return first
+
+    def normalize_run_command(cmd):
+        """Best-effort normalization to reduce interactive scaffolding prompts."""
+        normalized = (cmd or "").strip()
+        lowered = normalized.lower()
+
+        # Translate common Unix remove flags into PowerShell-native form.
+        rm_prefixes = ["rm -rf ", "rm -fr ", "rm -r -f ", "rm -f -r "]
+        for prefix in rm_prefixes:
+            if lowered.startswith(prefix):
+                targets = normalized[len(prefix) :].strip()
+                if targets:
+                    return f"Remove-Item -Recurse -Force {targets}"
+
+        if lowered.startswith("npm create ") and " --yes" not in lowered:
+            # Example: npm create vite@latest app -- --template react
+            normalized = normalized.replace("npm create ", "npm create --yes ", 1)
+
+        if lowered in ["dir /ad /b", "ls /ad /b"]:
+            return "Get-ChildItem -Directory -Name"
+
+        if lowered.startswith("npx create-vite") and " --yes" not in lowered:
+            normalized = normalized + " --yes"
+
+        return normalized
 
     def truncate_for_history(text, limit=6000):
         """Keep history compact enough for prompt context while preserving key output."""
@@ -65,14 +101,29 @@ def run_task(prompt, cwd, context=None, available_models=None):
             "rm -rf",
             "del /f",
             "rmdir /s",
+            "remove-item",
+            "clear-item",
             "format ",
             "shutdown ",
             "pip install --upgrade pip",
             "npm install -g",
             "choco install",
             "winget install",
+            "get-childitem -directory | remove-item",
+            "get-childitem -force | remove-item",
         ]
-        return any(pattern in normalized for pattern in risky_patterns)
+
+        if any(pattern in normalized for pattern in risky_patterns):
+            return True
+
+        # Guard broad wildcard removals in PowerShell/cmd contexts.
+        wildcard_delete_fragments = ["\\*", "/*", " *"]
+        if ("remove-item" in normalized or normalized.startswith("del ") or normalized.startswith("erase ")) and any(
+            fragment in normalized for fragment in wildcard_delete_fragments
+        ):
+            return True
+
+        return False
 
     def requires_run_verification(prompt_text):
         lower = (prompt_text or "").lower()
@@ -148,6 +199,30 @@ STDERR:
         ]
 
         if any(normalized.startswith(prefix) for prefix in mutating_prefixes):
+            return True
+
+        # PowerShell and compound command mutation patterns.
+        mutating_fragments = [
+            " remove-item",
+            "remove-item ",
+            " set-content",
+            "set-content ",
+            " add-content",
+            "add-content ",
+            " new-item",
+            "new-item ",
+            " rename-item",
+            "rename-item ",
+            " copy-item",
+            "copy-item ",
+            " move-item",
+            "move-item ",
+            " ni ",
+            " ri ",
+            " md ",
+        ]
+        wrapped = f" {normalized} "
+        if any(fragment in wrapped for fragment in mutating_fragments):
             return True
 
         # Basic shell redirection often indicates file writes.
@@ -339,6 +414,7 @@ IMPORTANT:
 8. Remain in debugging flow until completion
 9. Use RESUME only when the issue is fixed and normal coding flow should continue
 10. If a mutating action is needed and preflight context is missing, do READ: . first
+11. Prefer non-interactive scaffolding commands (for npm create/npx create-vite include --yes and explicit templates)
 """
                 else:
                     action_prompt = f"""
@@ -385,6 +461,7 @@ CRITICAL RULES:
 12. If a command failed because the desired state already exists, respond with: DONE
 13. Use LAST STEP RESULT to decide the next best action for ANY task type
 14. Before mutating actions, ensure directory context exists (READ . if needed)
+15. For project scaffolding, avoid interactive prompts (use --yes and explicit template flags)
 """
 
                 history = context.chat_history[-8:] if context else None
@@ -410,6 +487,7 @@ CRITICAL RULES:
                 executed_action_count += 1
 
                 cmd = action.split("RUN:")[1].strip().split("\n")[0]
+                cmd = normalize_run_command(cmd)
 
                 if context and context.safety_mode and is_risky_command(cmd):
                     last_step_result = (
@@ -447,7 +525,7 @@ CRITICAL RULES:
 
                 print(f"EXECUTING COMMAND: {cmd}")
 
-                result = run_command(cmd, cwd, timeout_seconds=240)
+                result = run_command(cmd, cwd, timeout_seconds=120)
 
                 last_step_result = summarize_step_result(result, cmd)
 
@@ -466,6 +544,11 @@ STDERR:
                     debug_mode = True
                     last_failed_command = cmd
                     last_error_message = result.get("stderr_trimmed", "")
+                    if result.get("error_type") == "timeout":
+                        last_error_message += (
+                            "\nLikely interactive prompt or slow network. "
+                            "Retry with non-interactive flags (--yes, explicit template) or choose a new empty target directory."
+                        )
                     repeated_failure_counts[cmd] = repeated_failure_counts.get(cmd, 0) + 1
                     last_action_success = False
                     append_step_history("RUN", cmd, "failure", run_details)

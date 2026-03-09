@@ -54,12 +54,18 @@ def run_command(cmd, cwd, timeout_seconds=180):
         }
 
     timed_out = False
+    run_env = os.environ.copy()
+    # Encourage package managers and scaffold tools to run non-interactively.
+    run_env.setdefault("CI", "1")
+    run_env.setdefault("npm_config_yes", "true")
     try:
         result = subprocess.run(
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            stdin=subprocess.DEVNULL,
+            env=run_env,
             **run_args,
         )
         stdout = result.stdout
